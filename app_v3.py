@@ -234,103 +234,161 @@ def render_prompt_lab(df):
     if "test_results" in st.session_state and st.session_state.test_results:
         st.subheader("区域 B: 结果透视")
         results = st.session_state.test_results
-        categories = [r.get("category", "Unknown") for r in results.values() if isinstance(r, dict)]
         
-        if categories:
-            # 统计展示
-            counts = pd.Series(categories).value_counts()
-            st.markdown(f"**📈 统计概览 (共 {len(categories)} 条)**")
+        # 1. 自动探测所有的 key
+        all_keys = set()
+        for r in results.values():
+            if isinstance(r, dict):
+                all_keys.update(r.keys())
+        
+        # 排除 reason, raw_output 等非标签 key
+        candidate_keys = [k for k in all_keys if k not in ["reason", "raw_output", "error"]]
+        
+        if not candidate_keys:
+            st.warning("未检测到有效的 JSON 标签字段，请检查 Prompt 输出格式。")
+        else:
+            # 让用户选择当前要分析的维度
+            if "target_label_key" not in st.session_state:
+                st.session_state.target_label_key = candidate_keys[0] if candidate_keys else ""
             
-            # 转置展示，分类名作为列头
-            count_df = counts.to_frame(name="笔记数").T
+            # 如果之前的 key 不在了，重置
+            if st.session_state.target_label_key not in candidate_keys and candidate_keys:
+                st.session_state.target_label_key = candidate_keys[0]
+                
+            c_view1, c_view2 = st.columns([1, 3])
+            with c_view1:
+                st.session_state.target_label_key = st.selectbox("📊 选择分析维度", candidate_keys, index=candidate_keys.index(st.session_state.target_label_key))
+            
+            target_key = st.session_state.target_label_key
+            
+            # 提取当前维度的值
+            current_values = [r.get(target_key, "Unknown") for r in results.values() if isinstance(r, dict)]
+            
+            # 统计展示
+            counts = pd.Series(current_values).value_counts()
+            st.markdown(f"**📈 '{target_key}' 分布概览**")
+            
+            # 转置展示
+            count_df = counts.to_frame(name="数量").T
             st.dataframe(count_df, use_container_width=True)
         
-        unique_cats = sorted(list(set(categories)))
-        if hasattr(st, "pills"):
-            selected_cat = st.pills("选择分类查看详情", unique_cats, selection_mode="single")
-        else:
-            selected_cat = st.radio("选择分类查看详情", unique_cats, horizontal=True)
-            
-        if selected_cat:
-            cat_indices = [i for i, r in results.items() if r.get("category", "Unknown") == selected_cat]
-            display_indices = cat_indices[:5] 
-            
-            st.write("👀 **显示设置**")
-            all_cols = df.columns.tolist()
-            default_cols = [st.session_state.text_col] + [c for c in st.session_state.context_cols if c in all_cols]
-            show_cols = st.multiselect("选择在详情中展示的原始列", all_cols, default=default_cols)
-            
-            for idx in display_indices:
-                with st.expander(f"📄 {str(df.loc[idx, st.session_state.text_col])[:50]}...", expanded=True):
-                    col_content, col_reason = st.columns([2, 1])
-                    with col_content:
-                        if show_cols:
-                            for col in show_cols:
-                                st.write(f"**{col}:**")
-                                st.caption(df.loc[idx, col])
-                        else:
-                            st.write("**内容:**")
-                            st.write(df.loc[idx, st.session_state.text_col])
+            unique_cats = sorted(list(set(current_values)))
+            if hasattr(st, "pills"):
+                selected_cat = st.pills(f"选择 '{target_key}' 查看详情", unique_cats, selection_mode="single")
+            else:
+                selected_cat = st.radio(f"选择 '{target_key}' 查看详情", unique_cats, horizontal=True)
+                
+            if selected_cat:
+                # 筛选出当前维度符合选定值的 index
+                cat_indices = [i for i, r in results.items() if r.get(target_key, "Unknown") == selected_cat]
+                display_indices = cat_indices[:5] 
+                
+                st.write("👀 **显示设置**")
+                all_cols = df.columns.tolist()
+                default_cols = [st.session_state.text_col] + [c for c in st.session_state.context_cols if c in all_cols]
+                show_cols = st.multiselect("选择在详情中展示的原始列", all_cols, default=default_cols)
+                
+                for idx in display_indices:
+                    with st.expander(f"📄 {str(df.loc[idx, st.session_state.text_col])[:50]}...", expanded=True):
+                        col_content, col_reason = st.columns([2, 1])
+                        with col_content:
+                            if show_cols:
+                                for col in show_cols:
+                                    st.write(f"**{col}:**")
+                                    st.caption(df.loc[idx, col])
+                            else:
+                                st.write("**内容:**")
+                                st.write(df.loc[idx, st.session_state.text_col])
+                                
+                            st.write(f"**AI 判定理由:** {results[idx].get('reason', 'N/A')}")
                             
-                        st.write(f"**AI 判定理由:** {results[idx].get('reason', 'N/A')}")
-                        
-                        # 如果解析失败，显示原始输出以便调试
-                        if "raw_output" in results[idx]:
-                            st.warning("⚠️ 无法解析 AI 返回的 JSON，请检查 Prompt 或模型输出。")
-                            with st.expander("查看原始输出"):
+                            # 显示所有提取到的标签
+                            st.write("**AI 提取的所有标签:**")
+                            st.json({k: v for k, v in results[idx].items() if k not in ["reason", "raw_output"]})
+                            
+                            if "raw_output" in results[idx]:
+                                st.warning("⚠️ 无法解析 AI 返回的 JSON")
                                 st.code(results[idx]["raw_output"], language="json")
 
-                        if st.button("🧠 深度 AI 归因", key=f"btn_reason_{idx}"):
-                            reason = get_ai_reasoning(df.loc[idx], st.session_state.text_col, st.session_state.context_cols, selected_cat, st.session_state.api_key, st.session_state.base_url, st.session_state.model_name)
-                            st.info(reason)
-                    with col_reason:
-                        st.write("**人工修正:**")
-                        current_fix = st.session_state.manual_corrections.get(idx, selected_cat)
+                            if st.button("🧠 深度 AI 归因", key=f"btn_reason_{idx}"):
+                                reason = get_ai_reasoning(df.loc[idx], st.session_state.text_col, st.session_state.context_cols, f"{target_key}={selected_cat}", st.session_state.api_key, st.session_state.base_url, st.session_state.model_name)
+                                st.info(reason)
                         
-                        # 准备选项列表，确保 current_fix 在选项中
-                        options = unique_cats + ["自定义..."]
-                        
-                        # 确定当前选中的 index
-                        if current_fix in unique_cats:
-                            idx_sel = unique_cats.index(current_fix)
-                        else:
-                            idx_sel = len(unique_cats) # "自定义..."
+                        with col_reason:
+                            st.write(f"**人工修正 ({target_key}):**")
+                            
+                            # 获取当前针对该 idx 该 key 的修正值
+                            # manual_corrections 结构改为: {idx: {key1: val1, key2: val2}}
+                            current_corrections = st.session_state.manual_corrections.get(idx, {})
+                            current_fix = current_corrections.get(target_key, selected_cat)
+                            
+                            options = unique_cats + ["自定义..."]
+                            
+                            if current_fix in unique_cats:
+                                idx_sel = unique_cats.index(current_fix)
+                            else:
+                                idx_sel = len(unique_cats) # "自定义..."
 
-                        new_fix_select = st.selectbox("修正分类", options, index=idx_sel, key=f"fix_sel_{idx}")
-                        
-                        final_fix = new_fix_select
-                        if new_fix_select == "自定义...":
-                            # 如果选择了自定义，显示输入框，默认值为之前的自定义值（如果之前也是自定义的话）
-                            default_custom = current_fix if current_fix not in unique_cats else ""
-                            custom_val = st.text_input("输入自定义分类", value=default_custom, key=f"fix_custom_{idx}")
-                            if custom_val:
-                                final_fix = custom_val
-                        
-                        if final_fix != selected_cat:
-                            st.session_state.manual_corrections[idx] = final_fix
+                            new_fix_select = st.selectbox("修正分类", options, index=idx_sel, key=f"fix_sel_{idx}_{target_key}")
+                            
+                            final_fix = new_fix_select
+                            if new_fix_select == "自定义...":
+                                default_custom = current_fix if current_fix not in unique_cats else ""
+                                custom_val = st.text_input("输入自定义值", value=default_custom, key=f"fix_custom_{idx}_{target_key}")
+                                if custom_val:
+                                    final_fix = custom_val
+                            
+                            # 保存修正逻辑
+                            if final_fix != selected_cat:
+                                if idx not in st.session_state.manual_corrections:
+                                    st.session_state.manual_corrections[idx] = {}
+                                st.session_state.manual_corrections[idx][target_key] = final_fix
 
         st.subheader("区域 C: 优化建议")
         if st.button("根据我的修正生成 Prompt 修改建议"):
             if not st.session_state.manual_corrections:
                 st.warning("请先在上方进行一些人工修正。")
             else:
-                with st.spinner("AI 正在分析误判原因..."):
-                    suggestion = analyze_misclassification(st.session_state.manual_corrections, results, df, st.session_state.text_col, st.session_state.system_prompt, st.session_state.api_key, st.session_state.base_url, st.session_state.model_name)
-                    
-                    # Simple parsing to separate analysis and code
-                    parts = suggestion.split("【优化后的 System Prompt】")
-                    if len(parts) == 2:
-                        analysis_text = parts[0].replace("【分析与建议】", "").strip()
-                        new_prompt_text = parts[1].strip()
+                # 构造传递给 AI 的修正数据，只包含当前关注的 target_key 相关的修正
+                target_key = st.session_state.get("target_label_key", "category")
+                relevant_corrections = {}
+                for idx, corrections in st.session_state.manual_corrections.items():
+                    if target_key in corrections:
+                        relevant_corrections[idx] = corrections[target_key]
+                
+                if not relevant_corrections:
+                     st.warning(f"请先针对当前分析维度 '{target_key}' 进行一些修正。")
+                else:
+                    with st.spinner(f"AI 正在分析 '{target_key}' 的误判原因..."):
+                        # 临时构造一个只包含 target_key 的 processed_data 视图给分析函数
+                        temp_processed_data = {}
+                        for idx, res in results.items():
+                            temp_processed_data[idx] = {"category": res.get(target_key, "Unknown")} # 欺骗函数名为 category
+
+                        suggestion = analyze_misclassification(
+                            relevant_corrections, 
+                            temp_processed_data, 
+                            df, 
+                            st.session_state.text_col, 
+                            st.session_state.system_prompt, 
+                            st.session_state.api_key, 
+                            st.session_state.base_url, 
+                            st.session_state.model_name
+                        )
                         
-                        st.markdown("#### 💡 分析与建议")
-                        st.markdown(analysis_text)
-                        
-                        st.markdown("#### ✨ 优化后的 System Prompt")
-                        st.code(new_prompt_text, language="text")
-                        st.info("请复制上面的 Prompt，并替换左侧的 System Prompt 编辑框内容。")
-                    else:
-                        st.markdown(suggestion)
+                        parts = suggestion.split("【优化后的 System Prompt】")
+                        if len(parts) == 2:
+                            analysis_text = parts[0].replace("【分析与建议】", "").strip()
+                            new_prompt_text = parts[1].strip()
+                            
+                            st.markdown("#### 💡 分析与建议")
+                            st.markdown(analysis_text)
+                            
+                            st.markdown("#### ✨ 优化后的 System Prompt")
+                            st.code(new_prompt_text, language="text")
+                            st.info("请复制上面的 Prompt，并替换左侧的 System Prompt 编辑框内容。")
+                        else:
+                            st.markdown(suggestion)
 
 def render_batch_run(df):
     st.header("3. 全量运行")
@@ -396,14 +454,14 @@ def render_batch_run(df):
         st.markdown("##### 🔍 抽样质检")
         c_qa_1, c_qa_2, c_qa_3 = st.columns([1, 1, 2])
         with c_qa_1:
-            # Detect AI category column
-            ai_cols = [c for c in final_df.columns if c.startswith("AI_") and "category" in c.lower()]
-            default_qa_col = ai_cols[0] if ai_cols else (final_df.columns[0] if not final_df.empty else "")
-            # Fallback to any AI_ column if no category found
-            if not default_qa_col and final_df.columns.any():
-                 default_qa_col = [c for c in final_df.columns if c.startswith("AI_")][0]
+            # Detect AI category columns (excluding reason/raw_output)
+            ai_cols = [c for c in final_df.columns if c.startswith("AI_") and not any(x in c.lower() for x in ["reason", "raw_output", "error"])]
             
-            qa_col = st.selectbox("选择质检依据列", [c for c in final_df.columns if c.startswith("AI_")], index=[c for c in final_df.columns if c.startswith("AI_")].index(default_qa_col) if default_qa_col in [c for c in final_df.columns if c.startswith("AI_")] else 0)
+            if not ai_cols:
+                st.warning("未找到有效的 AI 标签列。")
+                qa_col = None
+            else:
+                qa_col = st.selectbox("选择质检依据列", ai_cols, key="qa_col_select")
         
         with c_qa_2:
             sample_size = st.number_input("抽样数量", min_value=10, max_value=1000, value=50)
@@ -426,19 +484,25 @@ def render_batch_run(df):
                     st.error(f"抽样失败: {e}")
 
         # 4.2 QA Interface
-        if st.session_state.qa_indices:
+        if st.session_state.qa_indices and qa_col:
             st.divider()
             qa_df = final_df.loc[st.session_state.qa_indices]
             
-            # Error Rate Calculation
+            # Error Rate Calculation (based on current qa_col)
+            # count how many indices have a correction for the current qa_col
+            error_count = 0
+            for idx in st.session_state.qa_indices:
+                if idx in st.session_state.qa_corrections:
+                    if qa_col in st.session_state.qa_corrections[idx]:
+                        error_count += 1
+            
             total_checked = len(qa_df)
-            error_count = len(st.session_state.qa_corrections)
             error_rate = (error_count / total_checked) * 100 if total_checked > 0 else 0
             
             # Metrics Display
             m1, m2, m3 = st.columns(3)
             m1.metric("抽样总量", total_checked)
-            m2.metric("人工标记错误", error_count, delta_color="inverse")
+            m2.metric(f"'{qa_col}' 错误数", error_count, delta_color="inverse")
             m3.metric("当前错误率", f"{error_rate:.1f}%", delta_color="inverse")
             
             # Category Filter
@@ -446,9 +510,9 @@ def render_batch_run(df):
             unique_cats = sorted(list(set(categories)))
             
             if hasattr(st, "pills"):
-                selected_cat_qa = st.pills("选择分类查看样本", unique_cats, selection_mode="single", key="qa_pills")
+                selected_cat_qa = st.pills(f"选择 '{qa_col}' 查看样本", unique_cats, selection_mode="single", key="qa_pills")
             else:
-                selected_cat_qa = st.radio("选择分类查看样本", unique_cats, horizontal=True, key="qa_radio")
+                selected_cat_qa = st.radio(f"选择 '{qa_col}' 查看样本", unique_cats, horizontal=True, key="qa_radio")
             
             if selected_cat_qa:
                 # Filter indices for this category
@@ -459,17 +523,28 @@ def render_batch_run(df):
                 else:
                     for idx in cat_indices:
                         # Determine current status
-                        is_error = idx in st.session_state.qa_corrections
-                        corrected_label = st.session_state.qa_corrections.get(idx, selected_cat_qa)
+                        is_error = False
+                        corrected_label = selected_cat_qa
+                        
+                        if idx in st.session_state.qa_corrections:
+                             if qa_col in st.session_state.qa_corrections[idx]:
+                                 is_error = True
+                                 corrected_label = st.session_state.qa_corrections[idx][qa_col]
                         
                         # Card View
                         with st.expander(f"{'❌' if is_error else '✅'} {str(qa_df.loc[idx, st.session_state.text_col])[:50]}...", expanded=True):
                             qc1, qc2 = st.columns([3, 1])
                             with qc1:
                                 st.markdown(f"**内容:** {qa_df.loc[idx, st.session_state.text_col]}")
-                                st.caption(f"AI 原判: {selected_cat_qa}")
+                                st.caption(f"AI 原判 ({qa_col}): {selected_cat_qa}")
                                 if f"AI_reason" in qa_df.columns:
                                      st.caption(f"理由: {qa_df.loc[idx, 'AI_reason']}")
+                                
+                                # Show other AI tags
+                                other_tags = {c: qa_df.loc[idx, c] for c in ai_cols if c != qa_col}
+                                if other_tags:
+                                    st.caption(f"其他标签: {other_tags}")
+
                             with qc2:
                                 # Manual Correction UI
                                 options = unique_cats + ["自定义..."]
@@ -479,21 +554,27 @@ def render_batch_run(df):
                                 else:
                                     sel_idx = len(unique_cats) # Custom
                                     
-                                new_correction = st.selectbox("校准分类", options, index=sel_idx, key=f"qa_fix_{idx}")
+                                new_correction = st.selectbox("校准分类", options, index=sel_idx, key=f"qa_fix_{idx}_{qa_col}")
                                 
                                 final_correction = new_correction
                                 if new_correction == "自定义...":
                                     default_custom = corrected_label if corrected_label not in unique_cats else ""
-                                    final_correction = st.text_input("输入分类", value=default_custom, key=f"qa_custom_{idx}")
+                                    final_correction = st.text_input("输入分类", value=default_custom, key=f"qa_custom_{idx}_{qa_col}")
                                 
                                 # Logic to update state and rerun if changed
                                 if final_correction != corrected_label:
+                                    if idx not in st.session_state.qa_corrections:
+                                        st.session_state.qa_corrections[idx] = {}
+                                    
                                     if final_correction != selected_cat_qa:
-                                        st.session_state.qa_corrections[idx] = final_correction
+                                        st.session_state.qa_corrections[idx][qa_col] = final_correction
                                     else:
                                         # Reverted to original
-                                        if idx in st.session_state.qa_corrections:
-                                            del st.session_state.qa_corrections[idx]
+                                        if qa_col in st.session_state.qa_corrections[idx]:
+                                            del st.session_state.qa_corrections[idx][qa_col]
+                                            # Clean up if empty
+                                            if not st.session_state.qa_corrections[idx]:
+                                                del st.session_state.qa_corrections[idx]
                                     st.rerun()
 
         # 4.3 QA Prompt Optimization
@@ -507,46 +588,70 @@ def render_batch_run(df):
                 st.warning("您尚未进行任何人工修正，无法分析误判原因。")
             else:
                 with st.spinner("AI 正在分析全量质检结果..."):
-                    # Reuse the same analysis function but with QA corrections
-                    suggestion = analyze_misclassification(
-                        st.session_state.qa_corrections, 
-                        # Mock processed_data structure for compatibility
-                        {i: {"category": qa_df.loc[i, qa_col]} for i in qa_df.index}, 
-                        df, 
-                        st.session_state.text_col, 
-                        st.session_state.system_prompt, 
-                        st.session_state.api_key, 
-                        st.session_state.base_url, 
-                        st.session_state.model_name
-                    )
+                    # Flatten corrections for the current column for analysis
+                    flat_corrections = {}
+                    current_qa_col = qa_col # Use the currently selected column for analysis
                     
-                    # Display results (same format as Tab 2)
-                    parts = suggestion.split("【优化后的 System Prompt】")
-                    if len(parts) == 2:
-                        analysis_text = parts[0].replace("【分析与建议】", "").strip()
-                        new_prompt_text = parts[1].strip()
-                        
-                        st.markdown("#### 💡 质检分析报告")
-                        st.markdown(analysis_text)
-                        
-                        st.markdown("#### ✨ 下一版 System Prompt 建议")
-                        st.code(new_prompt_text, language="text")
-                        st.success("您可以复制此 Prompt 用于下一批数据的生产，或在 Prompt 实验室中进一步微调。")
+                    for idx, cors in st.session_state.qa_corrections.items():
+                        if current_qa_col in cors:
+                            flat_corrections[idx] = cors[current_qa_col]
+                    
+                    if not flat_corrections:
+                        st.warning(f"请先针对当前选择的列 '{current_qa_col}' 进行一些修正。")
                     else:
-                        st.markdown(suggestion)
+                        suggestion = analyze_misclassification(
+                            flat_corrections, 
+                            {i: {"category": qa_df.loc[i, current_qa_col]} for i in qa_df.index}, 
+                            df, 
+                            st.session_state.text_col, 
+                            st.session_state.system_prompt, 
+                            st.session_state.api_key, 
+                            st.session_state.base_url, 
+                            st.session_state.model_name
+                        )
+                        
+                        # Display results (same format as Tab 2)
+                        parts = suggestion.split("【优化后的 System Prompt】")
+                        if len(parts) == 2:
+                            analysis_text = parts[0].replace("【分析与建议】", "").strip()
+                            new_prompt_text = parts[1].strip()
+                            
+                            st.markdown("#### 💡 质检分析报告")
+                            st.markdown(analysis_text)
+                            
+                            st.markdown("#### ✨ 下一版 System Prompt 建议")
+                            st.code(new_prompt_text, language="text")
+                            st.success("您可以复制此 Prompt 用于下一批数据的生产，或在 Prompt 实验室中进一步微调。")
+                        else:
+                            st.markdown(suggestion)
 
         st.divider()
         st.subheader("📥 导出最终结果")
         
         # Prepare Export Data
         export_df = final_df.copy()
-        export_df["Final_Category"] = export_df[qa_col] # Default to AI
         
         # Apply corrections
-        for idx, correct_label in st.session_state.qa_corrections.items():
-            export_df.loc[idx, "Final_Category"] = correct_label
-            export_df.loc[idx, "Is_Corrected"] = True
-            export_df.loc[idx, "Corrected_From"] = export_df.loc[idx, qa_col]
+        # qa_corrections format: {idx: {col: val, col2: val2}}
+        for idx, col_map in st.session_state.qa_corrections.items():
+            for col_name, correct_val in col_map.items():
+                # Update the original AI column directly or create a new one?
+                # Let's create a Final_ column
+                final_col_name = f"Final_{col_name.replace('AI_', '')}"
+                export_df.loc[idx, final_col_name] = correct_val
+                
+                # Also mark as corrected
+                export_df.loc[idx, f"Is_Corrected_{col_name}"] = True
+                export_df.loc[idx, f"Corrected_From_{col_name}"] = export_df.loc[idx, col_name]
+
+        # Fill Final columns for uncorrected rows
+        for col in export_df.columns:
+            if col.startswith("AI_") and "reason" not in col and "raw" not in col:
+                final_col_name = f"Final_{col.replace('AI_', '')}"
+                if final_col_name not in export_df.columns:
+                    export_df[final_col_name] = export_df[col]
+                else:
+                    export_df[final_col_name] = export_df[final_col_name].fillna(export_df[col])
 
         col_a, col_b = st.columns(2)
         with col_a:
@@ -556,7 +661,7 @@ def render_batch_run(df):
             st.download_button("📥 下载全量结果 (含修正)", buffer.getvalue(), "打标结果_最终.xlsx")
             
         with col_b:
-             st.info("导出说明：文件中将包含 'Final_Category' 列，为最终采用的分类结果（包含人工修正）。")
+             st.info("导出说明：文件中将包含 'Final_*' 列，为最终采用的分类结果（包含人工修正）。")
 
 # ==========================================
 # 主程序逻辑
